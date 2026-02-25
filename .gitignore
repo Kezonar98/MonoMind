@@ -1,0 +1,15 @@
+# Environments
+env/
+venv/
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Database volumes (Docker)
+pgdata/
+
+# IDEs
+.vscode/
+.idea/

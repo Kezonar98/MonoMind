@@ -51,7 +51,7 @@ Standard CRUD doesn't work well for FinTech. The database follows an **Append-On
 - [ ] Add runway prediction (burn rate analysis).
 - [ ] Simple Telegram Bot integration for the client-side UI.
 
-##Running Locally
+###Running Locally
 
 ```bash
 # Clone the repository

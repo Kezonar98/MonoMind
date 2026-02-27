@@ -36,3 +36,11 @@ class UserResponse(UserBase):
     transactions: list[TransactionResponse] = []
 
     model_config = ConfigDict(from_attributes=True)
+
+class ChatRequest(BaseModel):
+    user_id: int
+    message: str
+
+class ChatResponse(BaseModel):
+    intent: str
+    response: str

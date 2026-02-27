@@ -2,7 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-
+from app.agents.graph import app_graph
+from langchain_core.messages import HumanMessage
 from app.db.session import get_db
 from app.models import ledger, schemas
 
@@ -59,3 +60,37 @@ async def create_transaction(transaction: schemas.TransactionCreate, db: AsyncSe
     await db.refresh(db_transaction)
     
     return db_transaction
+
+@router.post("/chat/", response_model=schemas.ChatResponse)
+async def chat_with_agent(request: schemas.ChatRequest):
+    """
+    The main cognitive endpoint.
+    Accepts a text query, passes it through LangGraph, and returns a response.
+    """
+    try:
+        # 1. Form start state for the graph
+        initial_state = {
+            "messages": [HumanMessage(content=request.message)],
+            "user_id": request.user_id,
+            "intent": None,
+            "extracted_transactions": [],
+            "financial_result": None
+        }
+        
+        # 2. launch async graph execution with ainvoke (LangGraph >= 1.0)
+        final_state = await app_graph.ainvoke(initial_state)
+        
+        # 3. Take final state and extract the intent and the last message for the response
+        intent = final_state.get("intent", "unknown")
+        
+        # Last message from our model
+        final_message = final_state["messages"][-1].content
+        
+        return schemas.ChatResponse(
+            intent=intent, 
+            response=final_message
+        )
+        
+    except Exception as e:
+        # If database or AI engine fails, we want to catch it and return a user-friendly error message without exposing internal details.
+        raise HTTPException(status_code=500, detail=f"AI Engine Error: {str(e)}")

@@ -23,9 +23,9 @@ AsyncSessionLocal = async_sessionmaker(
 # Dependency Injector for FastAPI
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """
-    Генератор сесій бази даних. 
-    Гарантує безпечне закриття з'єднання після завершення запиту,
-    навіть якщо під час обробки виникла помилка.
+    Database session generator.
+    Ensures safe connection closure after request completion,
+    even if an error occurs during processing.
     """
     async with AsyncSessionLocal() as session:
         try:

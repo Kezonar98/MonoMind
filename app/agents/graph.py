@@ -25,6 +25,7 @@ class AgentState(TypedDict):
     intent: Optional[str]                   # LLM-derived intent from user query
     extracted_transactions: list[dict]      # Row data from Ledger
     financial_result: Optional[float]       # Result of deterministic math 
+    metrics: Optional[dict]                 # Dictionary for Analytics (burn rate, runway, etc. - for future expansion)
 
 # -----------------------------------------------------------------------------
 # 2. Nodes 
@@ -43,7 +44,7 @@ llm_router = ChatOllama(
 llm_chat = ChatOllama(
     model="llama3.2:1b", 
     temperature=0.3, # Some creativity for generating responses, but not too high to go off track
-    num_ctx=1024     # Again, we don't need a huge context window for this application, and smaller models can be faster and more cost-effective for our use case.
+    num_ctx=512     # Again, we don't need a huge context window for this application, and smaller models can be faster and more cost-effective for our use case.
 )
 
 def analyze_intent(state: AgentState) -> dict:
@@ -116,6 +117,7 @@ def run_math_engine(state: AgentState) -> dict:
     print("[NODE] Running Deterministic Math...")
     transactions = state.get("extracted_transactions", [])
     
+    total_spent = 0.0
     balance = 0.0
     for tx in transactions:
         amount = float(tx["amount"])
@@ -123,36 +125,73 @@ def run_math_engine(state: AgentState) -> dict:
             balance += amount
         else: # WITHDRAWAL or SUBSCRIPTION
             balance -= amount
+            total_spent += amount
             
-    print(f"[MATH] Calculated Balance: ${balance:.2f}")
-    return {"financial_result": balance}
-
+    # Calculate Runway. 
+    # Total_spent - is the burn rate (Let it be average monthly expenses)
+    runway_months = 0.0
+    if total_spent > 0:
+        runway_months = balance / total_spent
+        
+    print(f"[MATH] Balance: ${balance:.2f} | Burn Rate: ${total_spent:.2f} | Runway: {runway_months:.1f} months")
+    
+    return {
+        "financial_result": balance,
+        "metrics": {
+            "burn_rate": total_spent,
+            "runway_months": runway_months
+        }
+    }
+            
 def generate_final_response(state: AgentState) -> dict:
-    """Node 4: LLM forming a final response to the user based on all the data and calculations. This is where we want to be very careful to only use the deterministic data and not let the model "hallucinate" any numbers."""
+    """Node 4: LLM forming a final response to the user based on all the data and calculations."""
     print("[NODE] Generating Final Response...")
     
+    # Take all the relevant data from the state to form a comprehensive system prompt for the LLM.
     messages = state.get("messages", [])
     last_user_message = messages[-1].content
     transactions = state.get("extracted_transactions", [])
     balance = state.get("financial_result", 0.0)
     
-    # Convert transactions into a nice text format for the LLM to use in the response.
-    tx_text = "\n".join([
-        f"- {tx['tx_type']} | ${tx['amount']} | {tx['description']}" 
-        for tx in transactions
-    ])
-    if not tx_text:
-        tx_text = "No transactions found."
+    # Take the intent
+    intent = state.get("intent", "general_chat")
+    metrics = state.get("metrics") or {}
+    burn_rate = metrics.get("burn_rate", 0.0)
+    runway = metrics.get("runway_months", 0.0)
+    
+    # Dynamically form the system prompt based on the identified intent and the data we have. 
+    if intent == "analyze_runway":
+        # Prompt for analyze of Runway
+        system_prompt = f"""You are MonoMind, an elite financial AI assistant. 
+        The user is asking about their financial runway or burn rate.
+        Use ONLY these deterministic facts provided by the math engine:
+        - Current Balance: ${balance:.2f}
+        - Total Spent (Burn Rate): ${burn_rate:.2f}
+        - Estimated Financial Runway: {runway:.1f} months
         
-    system_prompt = f"""You are MonoMind, an elite financial AI assistant. 
-    Answer the user's question using ONLY the deterministic data provided below. 
-    Do NOT make up any numbers. Be concise and professional.
+        Explain these metrics clearly and professionally. Warn them if the runway is very short. Do not invent any numbers.
+        
+        CRITICAL: Always respond in English, regardless of the language the user speaks."""
+    else:
+        # Prompt for general balance inquiry (get_balance)
+        tx_text = "\n".join([
+            f"- {tx['tx_type']} | ${tx['amount']} | {tx['description']}" 
+            for tx in transactions
+        ])
+        if not tx_text:
+            tx_text = "No transactions found."
+            
+        system_prompt = f"""You are MonoMind, an elite financial AI assistant. 
+        Answer the user's question using ONLY the deterministic data provided below. 
+        Do NOT make up any numbers. Be concise and professional.
+        
+        Current Calculated Balance: ${balance:.2f}
+        Transaction History:
+        {tx_text}
+        
+        CRITICAL: Always respond in English, regardless of the language the user speaks."""
     
-    Current Calculated Balance: ${balance:.2f}
-    Transaction History:
-    {tx_text}
-    """
-    
+    #Form the prompt and call the model to generate a response.
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "{user_input}")
@@ -163,10 +202,10 @@ def generate_final_response(state: AgentState) -> dict:
     print("[SUCCESS] Final response generated.")
     
     return {"messages": [response]}
+
 # -----------------------------------------------------------------------------
 # 3. Edges 
 # -----------------------------------------------------------------------------
-
 def route_based_on_intent(state: AgentState) -> str:
     """After analyzing the intent, we need to decide where to route the flow next."""
     if state.get("intent") in ["get_balance", "analyze_runway"]:

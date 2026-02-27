@@ -1,3 +1,4 @@
+import os
 from typing import Annotated, TypedDict, Sequence, Optional
 import operator
 from langchain_core.messages import BaseMessage
@@ -32,8 +33,10 @@ class AgentState(TypedDict):
 # For now these are just placeholders. The real logic will be implemented in the future.
 # -----------------------------------------------------------------------------
 # Initialization local model one time
+OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
 llm_router = ChatOllama(
+    base_url=OLLAMA_URL,
     model="llama3.2:1b", 
     temperature=0.0, 
     format="json",
@@ -42,6 +45,7 @@ llm_router = ChatOllama(
 )
 
 llm_chat = ChatOllama(
+    base_url=OLLAMA_URL,
     model="llama3.2:1b", 
     temperature=0.3, # Some creativity for generating responses, but not too high to go off track
     num_ctx=512     # Again, we don't need a huge context window for this application, and smaller models can be faster and more cost-effective for our use case.

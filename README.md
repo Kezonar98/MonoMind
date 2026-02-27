@@ -1,4 +1,4 @@
-# 🏦 MonoMind: Edge-AI Financial Assistant
+#  MonoMind: Edge-AI Financial Assistant
 
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?style=for-the-badge&logo=fastapi)
@@ -10,7 +10,7 @@ MonoMind is an experimental, fully local financial AI assistant. It explores how
 
 The core idea is a strict **separation of concerns**: the LLM is only used for semantic routing and text formatting, while all math, logic, and data retrieval are handled deterministically by Python and PostgreSQL.
 
-## 🏗 Architecture & Engineering Trade-offs
+## Architecture & Engineering Trade-offs
 
 When building this MVP, I focused on solving two main problems: **Data Privacy** and **Hardware Constraints**.
 
@@ -31,7 +31,7 @@ Instead of a standard conversational loop, the AI operates as a directed graph:
 Standard CRUD doesn't work well for FinTech. The database follows an **Append-Only Ledger** pattern:
 * Balances are never updated via `UPDATE`. They are calculated on the fly by aggregating `DEPOSIT` and `WITHDRAWAL` transactions.
 
-## 🚀 Current Status (MVP Achieved)
+##  Current Status (MVP Achieved)
 
 **What's done:**
 - [x] Immutable PostgreSQL Ledger setup via asyncpg & Alembic.
@@ -41,7 +41,7 @@ Standard CRUD doesn't work well for FinTech. The database follows an **Append-On
 - [x] FastAPI Gateway exposing the cognitive engine (`POST /api/v1/chat/`).
 - [x] Hexagonal Architecture UI: Asynchronous Telegram Bot client connected to the core API.
 
-## 🗺️ Roadmap & Next Steps
+##  Roadmap & Next Steps
 
 This project is actively evolving. The upcoming milestones are divided into infrastructure, integrations, and advanced cognitive features:
 
@@ -58,7 +58,7 @@ This project is actively evolving. The upcoming milestones are divided into infr
 ### Phase 4: Experimental
 - [ ] **Multilingual Support:** Experiment with fine-tuning or larger models to handle native Ukrainian processing without losing Edge deployment capabilities.
 
-## 💻 Running Locally
+##  Running Locally
 *(Instructions will be updated to `docker-compose up` in the next release)*
 ```bash
 # Start the Core Backend

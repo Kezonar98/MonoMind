@@ -4,7 +4,7 @@ from app.core.config import settings
 from app.api import routes
 
 def get_application() -> FastAPI:
-    """Ініціалізація Bank-Grade FastAPI сервера."""
+    """Initialize the FastAPI application and include all routes."""
     app = FastAPI(
         title=settings.PROJECT_NAME,
         description="Core API Gateway for MonoMind Financial Assistant",
@@ -23,5 +23,5 @@ app = get_application()
 
 @app.get("/health")
 async def health_check():
-    """Ендпоінт для балансувальників навантаження (Kubernetes/AWS)."""
+    """Health check endpoint for load balancers (Kubernetes/AWS)."""
     return {"status": "operational", "service": settings.PROJECT_NAME}

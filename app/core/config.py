@@ -4,11 +4,12 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "MonoMind Core"
     
     # Credentials for connect
-    POSTGRES_USER: str = "monomind_admin"
-    POSTGRES_PASSWORD: str = "secure_dev_password_123"
-    POSTGRES_DB: str = "monomind_core"
-    POSTGRES_HOST: str = "localhost"
-    POSTGRES_PORT: str = "5432"
+    # Removed hardcoded values to enforce usage of .env file
+    POSTGRES_USER: str
+    POSTGRES_PASSWORD: str
+    POSTGRES_DB: str
+    POSTGRES_HOST: str
+    POSTGRES_PORT: str
 
     @property
     def async_database_url(self) -> str:

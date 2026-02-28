@@ -1,4 +1,4 @@
-# API & Core (Відв'язали версії для сумісності з LangChain)
+# API & Core 
 fastapi
 uvicorn==0.25.0
 pydantic
@@ -25,3 +25,10 @@ aiogram
 httpx
 python-dotenv
 email-validator==2.1.1
+
+# Model talking only English, let's add translation capabilities
+deep-translator==1.11.4
+
+# Analyze web search results(the average price of product)
+langchain-community==0.3.1
+duckduckgo-search==6.4.2

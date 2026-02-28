@@ -9,10 +9,11 @@ from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
 from sqlalchemy.future import select
 
-from app.db.session import AsyncSessionLocal # Importing the async session factory to fetch data from PostgreSQL
-from app.models import ledger # Importing ledger to access Transaction and User models for DB operations
-from deep_translator import GoogleTranslator # NEW: For language detection and translation 
-from langchain_community.tools import DuckDuckGoSearchRun # NEW: For real-time price checking in purchase evaluation logic
+from app.db.session import AsyncSessionLocal 
+from app.models import ledger 
+from deep_translator import GoogleTranslator 
+from langchain_community.tools import DuckDuckGoSearchRun 
+
 # =============================================================================
 # NEW IMPORTS FOR PURCHASE EVALUATION
 # =============================================================================
@@ -34,10 +35,11 @@ class AgentState(TypedDict):
     financial_result: Optional[float]       
     metrics: Optional[dict]                 
     
-    # NEW FIELDS: For Purchase Evaluation logic
-    purchase_data: Optional[dict]           # Extracted JSON from user's text (item_name, item_price)
-    purchase_risk: Optional[dict]           # Deterministic math output (is_risky, reason, details)
-    market_context: Optional[str]           # Real-time market data for the item 
+    # Fields for Purchase Evaluation logic
+    purchase_data: Optional[dict]           
+    purchase_risk: Optional[dict]           
+    market_context: Optional[str]           
+
 # =============================================================================
 # 2. LLM Initialization
 # =============================================================================
@@ -53,11 +55,11 @@ llm_router = ChatOllama(
     num_ctx=512          
 )
 
-# More creative LLM for final response generation
+# Strict LLM for final response generation
 llm_chat = ChatOllama(
     base_url=OLLAMA_URL,
     model="llama3.2:1b", 
-    temperature=0.3, 
+    temperature=0.0, # Kept at 0.0 to prevent hallucinations
     num_ctx=512     
 )
 
@@ -99,8 +101,6 @@ async def analyze_intent(state: AgentState) -> dict:
     messages = state.get("messages", [])
     last_user_message = state.get("translated_text") or (messages[-1].content if messages else "")
     
-    # UPDATED PROMPT: Added Few-Shot Examples to force the 1B model to behave.
-    # Double curly braces {{ }} are used to escape JSON brackets in LangChain format strings.
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a strictly logical financial routing AI. 
         Analyze the user's input and determine their intent.
@@ -133,7 +133,6 @@ async def analyze_intent(state: AgentState) -> dict:
         parsed_json = json.loads(response.content)
         intent = parsed_json.get("intent", "general_chat")
         
-        # Validation
         if intent not in ["get_balance", "analyze_runway", "evaluate_purchase", "general_chat"]:
             intent = "general_chat"
             
@@ -170,10 +169,7 @@ async def fetch_ledger_data(state: AgentState) -> dict:
     return {"extracted_transactions": extracted}
 
 def run_math_engine(state: AgentState) -> dict:
-    """
-    Node 3: The Deterministic Math Engine.
-    UPDATED: Calculates real total_income dynamically so we don't use hardcoded mock data in the Risk Analyzer.
-    """
+    """Node 3: The Deterministic Math Engine."""
     print("[NODE] Running Deterministic Math...")
     transactions = state.get("extracted_transactions", [])
     
@@ -185,8 +181,8 @@ def run_math_engine(state: AgentState) -> dict:
         amount = float(tx["amount"])
         if tx["tx_type"] == "DEPOSIT":
             balance += amount
-            total_income += amount  # Calculate real historical income
-        else: # WITHDRAWAL or SUBSCRIPTION
+            total_income += amount
+        else: 
             balance -= amount
             total_spent += amount
             
@@ -205,46 +201,38 @@ def run_math_engine(state: AgentState) -> dict:
         }
     }
 
-# =============================================================================
-# NEW NODES FOR PURCHASE EVALUATION
-# =============================================================================
 async def extract_purchase_info(state: AgentState) -> dict:
-    """Node 4a: Extracts structured product details from the user's text."""
+    """Node 4a: Extracts structured product details from the user's text with memory context."""
     print("[NODE] Extracting Purchase Information...")
     messages = state.get("messages", [])
-    text_to_analyze = state.get("translated_text") or (messages[-1].content if messages else "")
     
-    # UPDATED PROMPT: Strict instructions to stop hallucinating real-world prices
-    # Added slang understanding ("bucks", "grand", "k")
+    # Беремо останні 4 повідомлення для розуміння контексту діалогу
+    history_text = "\n".join([f"{'User' if m.type == 'human' else 'AI'}: {m.content}" for m in messages[-4:]])
+    
     prompt = ChatPromptTemplate.from_messages([
         ("system", """You are a STRICT data extraction algorithm. 
-        Your ONLY job is to extract the EXACT item name and the EXACT price mentioned in the user's text.
+        Your ONLY job is to extract the EXACT item name and the EXACT price mentioned in the conversation.
         
         CRITICAL RULES:
-        1. IGNORE real-world market prices. If the user says a PS5 costs 1 million, you extract 1000000.0.
-        2. Words like 'bucks', 'quid', 'grand', 'k' refer to money.
-        3. If no price is mentioned, set item_price to 0.0.
+        1. Read the CONVERSATION HISTORY. If the user proposes a new price (e.g., "what about 200?"), INFER the item_name from the previous messages (e.g. "PlayStation 5").
+        2. IGNORE real-world market prices. 
+        3. Words like 'bucks', 'quid', 'grand', 'k' refer to money.
+        4. If no item can be found in history, use "unknown item".
         
-        EXAMPLES:
-        User: "Can I buy a PS5 for 600 bucks?"
-        Expected Output: item_name="PS5", item_price=600.0
-        
-        User: "I want to get a used car for 25k"
-        Expected Output: item_name="used car", item_price=25000.0
+        CONVERSATION HISTORY:
+        {history}
         """),
-        ("user", "{input}")
+        ("user", "Extract the target item and the newest price from the history.")
     ])
     
     try:
         chain = prompt | structured_llm
-        result: PurchaseExtraction = await chain.ainvoke({"input": text_to_analyze})
+        result: PurchaseExtraction = await chain.ainvoke({"history": history_text})
         print(f"[EXTRACTOR] Found item: {result.item_name} for {result.item_price}")
         return {"purchase_data": result.model_dump()}
     except Exception as e:
         print(f"[EXTRACTOR ERROR] {e}")
-        # Fallback to prevent crash
         return {"purchase_data": {"item_name": "unknown item", "item_price": 0.0, "is_credit": False, "credit_months": 1}}
-
 def fetch_market_price(state: AgentState) -> dict:
     """Node 4.5: Searches the web for the current average price of the item."""
     print("[NODE] Fetching Market Price from Web...")
@@ -255,11 +243,9 @@ def fetch_market_price(state: AgentState) -> dict:
 
     try:
         search = DuckDuckGoSearchRun()
-        # Formulate a search queary to find the average price of the item.
         query = f"average price of {item_name} USD 2026"
         results = search.invoke(query)
         
-        # Cut results
         market_info = results[:1000] if results else "No clear pricing found online."
         print(f"[SEARCH] Found context: {market_info[:100]}...")
         
@@ -268,18 +254,13 @@ def fetch_market_price(state: AgentState) -> dict:
         print(f"[SEARCH ERROR] {e}")
         return {"market_context": "Could not fetch market data due to search error."}
     
-    
 def analyze_purchase_risk(state: AgentState) -> dict:
-    """
-    Node 4b: Evaluates financial safety dynamically based on REAL database metrics,
-    strictly eliminating hardcoded mock values.
-    """
+    """Node 4b: Evaluates financial safety dynamically based on REAL database metrics."""
     print("[NODE] Analyzing Purchase Risk...")
     data = state.get("purchase_data", {})
     metrics = state.get("metrics", {})
     real_balance = state.get("financial_result", 0.0)
     
-    # We use actual data from DB instead of fake numbers!
     real_income = metrics.get("monthly_income", 0.0)
     real_expenses = metrics.get("burn_rate", 0.0)
     
@@ -299,22 +280,30 @@ def analyze_purchase_risk(state: AgentState) -> dict:
     print(f"[RISK ANALYZER] Verdict: {'Risky' if verdict['is_risky'] else 'Safe'} - {verdict['reason']}")
     return {"purchase_risk": verdict}
 
-# =============================================================================
-
 async def generate_final_response(state: AgentState) -> dict:
     """Node 5: The Chat Responder."""
     print("[NODE] Generating Final Response...")
     messages = state.get("messages", [])
     last_user_message = state.get("translated_text") or (messages[-1].content if messages else "")
-    transactions = state.get("extracted_transactions", [])
-    balance = state.get("financial_result", 0.0)
+    
+    # ==========================================
+    # FIX: NULL VALUE PROTECTION
+    # ==========================================
+    transactions = state.get("extracted_transactions") or []
+    balance = state.get("financial_result")
+    
+    # If the graph bypassed the math node (e.g., general_chat), balance will be None.
+    # We force it to 0.0 to prevent a 500 Internal Server Error during string formatting.
+    if balance is None:
+        balance = 0.0
+        
     intent = state.get("intent", "general_chat")
     metrics = state.get("metrics") or {}
     
     burn_rate = metrics.get("burn_rate", 0.0)
     runway = metrics.get("runway_months", 0.0)
+    # ==========================================
     
-    # UPDATED: Add prompt template for evaluate_purchase
     if intent == "evaluate_purchase":
         purchase = state.get("purchase_data", {})
         risk = state.get("purchase_risk", {})
@@ -333,7 +322,7 @@ async def generate_final_response(state: AgentState) -> dict:
         [MARKET RESEARCH FROM WEB]
         {market}
 
-       Write a professional response. 
+        Write a professional response. 
         1. State if the purchase is approved or denied based on the Calculator Verdict and user's balance.
         2. Compare the user's Target Price with the average prices found in the Market Research. Advise if they are overpaying or if it's a good deal.
         Do not invent numbers. Base your market analysis ONLY on the [MARKET RESEARCH FROM WEB] block. Always respond in English."""
@@ -373,20 +362,17 @@ async def generate_final_response(state: AgentState) -> dict:
 # 4. Edges (Routing Logic)
 # =============================================================================
 def route_based_on_intent(state: AgentState) -> str:
-    """Route from Intent Analyzer to the correct next step."""
-    # evaluate_purchase ALSO needs database data to know the real balance!
     if state.get("intent") in ["get_balance", "analyze_runway", "evaluate_purchase"]:
         return "fetch_ledger_data"
     return "generate_final_response"
 
 def route_after_math(state: AgentState) -> str:
-    """After getting DB data and doing math, decide if we need to extract purchase info."""
     if state.get("intent") == "evaluate_purchase":
         return "extract_purchase_info"
     return "generate_final_response"
 
 # =============================================================================
-# 5. Graph Compilation
+# 5. Graph Compilation with Static Memory (SQLite)
 # =============================================================================
 workflow = StateGraph(AgentState)
 
@@ -395,16 +381,15 @@ workflow.add_node("translate_input", translate_user_input)
 workflow.add_node("analyze_intent", analyze_intent)
 workflow.add_node("fetch_ledger_data", fetch_ledger_data)
 workflow.add_node("run_math_engine", run_math_engine)
-workflow.add_node("extract_purchase_info", extract_purchase_info)     # NEW
-workflow.add_node("analyze_purchase_risk", analyze_purchase_risk)     # NEW
-workflow.add_node("generate_final_response", generate_final_response)
+workflow.add_node("extract_purchase_info", extract_purchase_info)
 workflow.add_node("fetch_market_price", fetch_market_price)
+workflow.add_node("analyze_purchase_risk", analyze_purchase_risk)
+workflow.add_node("generate_final_response", generate_final_response)
 
-# Define the flow path
+# Flow definitions
 workflow.set_entry_point("translate_input")
 workflow.add_edge("translate_input", "analyze_intent")
 
-# Dynamic branching based on intent
 workflow.add_conditional_edges(
     "analyze_intent",
     route_based_on_intent,
@@ -414,10 +399,8 @@ workflow.add_conditional_edges(
     }
 )
 
-# Fetch DB -> Run Math
 workflow.add_edge("fetch_ledger_data", "run_math_engine")
 
-# After Math, branch again: either go to final response, OR evaluate purchase
 workflow.add_conditional_edges(
     "run_math_engine",
     route_after_math,
@@ -427,13 +410,11 @@ workflow.add_conditional_edges(
     }
 )
 
-# Linear flow for purchase evaluation
 workflow.add_edge("extract_purchase_info", "fetch_market_price")
 workflow.add_edge("fetch_market_price", "analyze_purchase_risk")
 workflow.add_edge("analyze_purchase_risk", "generate_final_response") 
-
-#End our graph
 workflow.add_edge("generate_final_response", END)
 
-# Compile into an executable application
-app_graph = workflow.compile()
+# NEW: Export the uncompiled workflow. 
+# Memory compilation is now handled dynamically inside routes.py to avoid async conflicts.
+app_workflow = workflow

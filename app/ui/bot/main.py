@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-API_URL = os.getenv("API_URL", "http://127.0.0.1:8000/api/v1/chat/")
+API_URL = os.getenv("API_URL")
 
 if not TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN is not set in the .env file. Please check your configuration.")
@@ -55,7 +55,7 @@ async def handle_message(message: Message) -> None:
     """Intercepts all text messages and forwards them to the FastAPI backend."""
     
     # 1. Notify the user that processing has started (UX improvement)
-    processing_msg = await message.answer("🔄 Accessing the secure ledger...")
+    processing_msg = await message.answer("🔄 Generate response, please wait...")
     
     # 2. Send an HTTP POST request to our LangGraph backend
     async with httpx.AsyncClient(timeout=60.0) as client:

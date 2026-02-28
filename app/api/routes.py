@@ -2,7 +2,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from app.agents.graph import app_graph
+from app.agents.graph import app_workflow # CHANGED: Importing uncompiled workflow
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver # IMPORTING ASYNC SAVER
 from langchain_core.messages import HumanMessage
 from app.db.session import get_db
 from app.models import ledger, schemas
@@ -65,7 +66,7 @@ async def create_transaction(transaction: schemas.TransactionCreate, db: AsyncSe
 async def chat_with_agent(request: schemas.ChatRequest):
     """
     The main cognitive endpoint.
-    Accepts a text query, passes it through LangGraph, and returns a response.
+    Accepts a text query, passes it through LangGraph (with memory), and returns a response.
     """
     try:
         # 1. Form start state for the graph
@@ -77,10 +78,16 @@ async def chat_with_agent(request: schemas.ChatRequest):
             "financial_result": None
         }
         
-        # 2. launch async graph execution with ainvoke (LangGraph >= 1.0)
-        final_state = await app_graph.ainvoke(initial_state)
+        # 2. Create config Thread ID
+        config = {"configurable": {"thread_id": str(request.user_id)}}
         
-        # 3. Take final state and extract the intent and the last message for the response
+        # 3. NEW: Run the graph with the initial state and dynamic ASYNC memory configuration
+        # This prevents the Thread Lock 500 Error by compiling the graph asynchronously per request
+        async with AsyncSqliteSaver.from_conn_string("monomind_memory.sqlite") as memory:
+            app_graph = app_workflow.compile(checkpointer=memory)
+            final_state = await app_graph.ainvoke(initial_state, config=config)
+        
+        # 4. Take final state and extract the intent and the last message for the response
         intent = final_state.get("intent", "unknown")
         
         # Last message from our model
@@ -92,5 +99,8 @@ async def chat_with_agent(request: schemas.ChatRequest):
         )
         
     except Exception as e:
-        # If database or AI engine fails, we want to catch it and return a user-friendly error message without exposing internal details.
+        import traceback
+        traceback.print_exc()
+
+        # If database or AI engine fails, we want to catch it and return a user-friendly error message
         raise HTTPException(status_code=500, detail=f"AI Engine Error: {str(e)}")

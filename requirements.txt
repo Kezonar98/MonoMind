@@ -6,6 +6,8 @@ pydantic-settings
 
 # Database & ORM (Async)
 sqlalchemy==2.0.28
+aiosqlite
+langgraph-checkpoint-sqlite
 asyncpg==0.29.0
 pgvector==0.2.5
 alembic==1.13.1

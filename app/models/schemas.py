@@ -40,6 +40,7 @@ class UserResponse(UserBase):
 class ChatRequest(BaseModel):
     user_id: int
     message: str
+    image_base64: Optional[str] = None
 
 class ChatResponse(BaseModel):
     intent: str
@@ -57,6 +58,11 @@ class PurchaseExtraction(BaseModel):
     item_price: float = Field(
         description="The price of the item. Must be a number. If not found, return 0.0."
     )
+    currency: str = Field(
+        default="USD",
+        description="The currency of the price (e.g., 'USD', 'UAH', 'EUR'). If you see '₴', 'грн', or 'UAH' in text/image, set this to 'UAH'."
+    )
+    
     is_credit: bool = Field(
         default=False,
         description="True if the user mentions buying on credit, installments, or splitting the payment. Otherwise False."

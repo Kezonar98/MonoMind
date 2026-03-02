@@ -74,6 +74,7 @@ async def chat_with_agent(request: schemas.ChatRequest):
             "messages": [HumanMessage(content=request.message)],
             "user_id": request.user_id,
             "intent": None,
+            "image_base64": request.image_base64,
             "extracted_transactions": [],
             "financial_result": None
         }

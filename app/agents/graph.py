@@ -1,9 +1,11 @@
 import os
+import httpx # Required for making async API calls to Groq, Currency, and Jina
+import re    # NEW: Required for extracting URLs from user text
 from typing import Annotated, TypedDict, Sequence, Optional
 import operator
 import json
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.graph import StateGraph, END
 from langchain_ollama import ChatOllama
 from langchain_core.prompts import ChatPromptTemplate
@@ -13,57 +15,68 @@ from app.db.session import AsyncSessionLocal
 from app.models import ledger 
 from deep_translator import GoogleTranslator 
 from langchain_community.tools import DuckDuckGoSearchRun 
+from bs4 import BeautifulSoup
 
 # =============================================================================
-# NEW IMPORTS FOR PURCHASE EVALUATION
+# IMPORTS FOR PURCHASE EVALUATION
 # =============================================================================
 from app.models.schemas import PurchaseExtraction
 from app.services.risk_analyzer import RiskAnalyzer
 
 # =============================================================================
-# 1. State Definition (Agent memory)
+# 1. State Definition (Agent Memory)
 # =============================================================================
 class AgentState(TypedDict):
     """
     The central memory structure of our LangGraph pipeline.
+    This dictionary flows through every node, accumulating data.
     """
+    # Core Chat Data
     messages: Annotated[Sequence[BaseMessage], operator.add]
     user_id: int
     translated_text: Optional[str]          
     intent: Optional[str]                   
+    
+    # Financial Data from Database & Math Engine
     extracted_transactions: list[dict]      
     financial_result: Optional[float]       
     metrics: Optional[dict]                 
     
-    # Fields for Purchase Evaluation logic
+    # Specific Fields for Purchase Evaluation Logic
     purchase_data: Optional[dict]           
     purchase_risk: Optional[dict]           
-    market_context: Optional[str]           
+    market_context: Optional[str]   
+
+    # Vision and URL Contexts
+    image_base64: Optional[str]
+    vision_context: Optional[str]
+    url_context: Optional[str]      # NEW: Stores the scraped Markdown text from links
 
 # =============================================================================
-# 2. LLM Initialization
+# 2. LLM Initialization (Local text routing & generation)
 # =============================================================================
 OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# Fast, deterministic router
+# Fast, deterministic LLM used strictly for routing logic (JSON output)
+# INCREASED num_ctx to 2048 so it can read web page texts without truncating memory!
 llm_router = ChatOllama(
     base_url=OLLAMA_URL,
     model="llama3.2:1b", 
     temperature=0.0, 
     format="json",
     num_predict=50,      
-    num_ctx=512          
+    num_ctx=2048          
 )
 
-# Strict LLM for final response generation
+# Chat LLM used for generating the final human-readable response
 llm_chat = ChatOllama(
     base_url=OLLAMA_URL,
     model="llama3.2:1b", 
-    temperature=0.0, # Kept at 0.0 to prevent hallucinations
-    num_ctx=512     
+    temperature=0.0, 
+    num_ctx=1024     
 )
 
-# Structured LLM specifically forced to output PurchaseExtraction schema
+# Structured LLM forced to output data matching the PurchaseExtraction Pydantic schema
 structured_llm = llm_router.with_structured_output(PurchaseExtraction)
 
 # =============================================================================
@@ -71,7 +84,9 @@ structured_llm = llm_router.with_structured_output(PurchaseExtraction)
 # =============================================================================
 
 async def translate_user_input(state: AgentState) -> dict:
-    """Node 0: Detects language and translates to English if necessary."""
+    """
+    Node 0: Detects language and translates to English if necessary.
+    """
     print("[NODE] Translating User Input...")
     messages = state.get("messages", [])
     if not messages:
@@ -92,10 +107,97 @@ async def translate_user_input(state: AgentState) -> dict:
         print(f"⚠️ [Translator Warning] API failed: {e}. Falling back to original text.")
         return {"translated_text": original_text}
 
+async def extract_url_content(state: AgentState) -> dict:
+    """Node 0.5: Smart URL Scraper without forced currency."""
+    import json 
+    
+    print("[NODE] Checking for URLs in input...")
+    messages = state.get("messages", [])
+    last_user_message = messages[-1].content if messages else ""
+
+    urls = re.findall(r'(https?://[^\s]+)', last_user_message)
+    if not urls:
+        return {"url_context": "No URL provided."}
+
+    target_url = urls[0]
+    print(f"🔗 [URL] Found link: {target_url}. Fetching metadata...")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    }
+
+    has_price = False
+
+    try:
+        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+            response = await client.get(target_url, headers=headers)
+            response.raise_for_status()
+            html = response.text
+
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        og_title = soup.find("meta", property="og:title")
+        og_desc = soup.find("meta", property="og:description")
+        
+        title_text = og_title["content"] if og_title else (soup.title.string if soup.title else "")
+        desc_text = og_desc["content"] if og_desc else ""
+        
+        price_amount = soup.find("meta", property="product:price:amount")
+        price_currency = soup.find("meta", property="product:price:currency")
+        price_text = ""
+        
+        if price_amount:
+            # Більше ніяких дефолтних UAH! Беремо тільки те, що є на сайті.
+            currency = price_currency["content"] if price_currency else ""
+            price_text = f"EXACT PRICE: {price_amount['content']} {currency}"
+            has_price = True
+
+        if not has_price:
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    data = json.loads(script.string)
+                    if isinstance(data, list):
+                        for item in data:
+                            if "offers" in item and "price" in item["offers"]:
+                                price_text = f"EXACT PRICE: {item['offers']['price']} {item['offers'].get('priceCurrency', '')}"
+                                has_price = True
+                                break
+                    elif isinstance(data, dict):
+                        if "offers" in data and "price" in data["offers"]:
+                            price_text = f"EXACT PRICE: {data['offers']['price']} {data['offers'].get('priceCurrency', '')}"
+                            has_price = True
+                except:
+                    continue
+
+        extracted_info = f"Product Title: {title_text}\nDescription: {desc_text[:500]}\n{price_text}"
+        
+        if title_text and has_price:
+            print(f"📄 https://www.success.com/ Found Title and Price in HTML:\n{extracted_info}")
+            return {"url_context": extracted_info}
+            
+    except Exception as e:
+        print(f"⚠️ https://metastatus.com/ HTML parsing failed: {e}")
+
+    print("🔄 Price not found in HTML headers. Falling back to Jina Reader...")
+    try:
+        jina_url = f"https://r.jina.ai/{target_url}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.get(jina_url)
+            response.raise_for_status()
+            content = response.text
+
+        clean_content = content[:2000]
+        print(f"📄 https://www.success.com/ Scraped via Jina Reader.")
+        return {"url_context": clean_content}
+        
+    except Exception as e:
+        print(f"⚠️ https://www.merriam-webster.com/dictionary/error Jina Reader also failed: {e}")
+        return {"url_context": "Failed to scrape URL."}
+    
+
 async def analyze_intent(state: AgentState) -> dict:
     """
     Node 1: The AI Router. 
-    Now uses few-shot prompting for better accuracy and prevents LLM hallucinations.
     """
     print("[NODE] Analyzing Intent with Ollama...")
     messages = state.get("messages", [])
@@ -201,40 +303,144 @@ def run_math_engine(state: AgentState) -> dict:
         }
     }
 
+async def analyze_image(state: AgentState) -> dict:
+    """Node 3.5: Vision Processing via Groq API."""
+    image_data = state.get("image_base64")
+    
+    if not image_data:
+        return {"vision_context": "No image provided."}
+
+    print("[NODE] Analyzing Image with Groq Vision AI...")
+    
+    api_key = os.getenv("GROQ_API_KEY")
+    if not api_key:
+        print("[VISION ERROR] GROQ_API_KEY is missing from environment variables!")
+        return {"vision_context": "Failed to analyze image: API key missing."}
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": "llama-3.2-11b-vision-preview",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text", 
+                        "text": "Look at this screenshot. Find the exact product name, its numerical price, and the currency symbol (like ₴, грн, UAH). IMPORTANT: Translate your final answer to English so the next system can understand it. Reply STRICTLY with the product name, price, and currency."
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{image_data}"
+                        }
+                    }
+                ]
+            }
+        ],
+        "temperature": 0.0
+    }
+
+    try:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            response.raise_for_status()
+            data = response.json()
+            
+        vision_result = data["choices"][0]["message"]["content"]
+        print(f"[VISION] Extracted from image (Groq): {vision_result}")
+        return {"vision_context": vision_result}
+        
+    except Exception as e:
+        print(f"[VISION ERROR] Groq API failed: {e}")
+        return {"vision_context": "Failed to analyze image."}
+
+
 async def extract_purchase_info(state: AgentState) -> dict:
-    """Node 4a: Extracts structured product details from the user's text with memory context."""
+    """
+    Node 4a: Data Extractor.
+    Now looks at both [IMAGE DATA] and https://www.merriam-webster.com/dictionary/data to find the purchase info.
+    """
     print("[NODE] Extracting Purchase Information...")
     messages = state.get("messages", [])
     
-    # Беремо останні 4 повідомлення для розуміння контексту діалогу
     history_text = "\n".join([f"{'User' if m.type == 'human' else 'AI'}: {m.content}" for m in messages[-4:]])
     
+    vision_info = state.get("vision_context", "No image provided.")
+    url_info = state.get("url_context", "No URL provided.") # NEW: Retrieve URL text
+    
     prompt = ChatPromptTemplate.from_messages([
-        ("system", """You are a STRICT data extraction algorithm. 
-        Your ONLY job is to extract the EXACT item name and the EXACT price mentioned in the conversation.
+        ("system", f"""You are a STRICT data extraction algorithm. 
+        Your ONLY job is to extract the EXACT item name, the EXACT price, and the CURRENCY from the conversation, image data, AND web page text.
+        
+        [IMAGE DATA]: {vision_info}
+        [WEB PAGE TEXT]: {url_info}
         
         CRITICAL RULES:
-        1. Read the CONVERSATION HISTORY. If the user proposes a new price (e.g., "what about 200?"), INFER the item_name from the previous messages (e.g. "PlayStation 5").
-        2. IGNORE real-world market prices. 
-        3. Words like 'bucks', 'quid', 'grand', 'k' refer to money.
-        4. If no item can be found in history, use "unknown item".
+        1. If a URL was provided, look closely at the [WEB PAGE TEXT] to find the product name and price. 
+        2. IGNORE real-world market prices in your extraction. Use ONLY the data provided.
+        3. Convert currency to a float number (e.g. if the text says 4645 UAH, extract 4645.0).
+        4. If no item can be found, use "unknown item".
+        5. Extract the EXACT price AND the currency (e.g., "USD", "UAH", "EUR").
         
         CONVERSATION HISTORY:
-        {history}
+        {{history}}
         """),
-        ("user", "Extract the target item and the newest price from the history.")
+        ("user", "Extract the target item, newest price, and currency.")
     ])
     
     try:
         chain = prompt | structured_llm
         result: PurchaseExtraction = await chain.ainvoke({"history": history_text})
-        print(f"[EXTRACTOR] Found item: {result.item_name} for {result.item_price}")
+        print(f"[EXTRACTOR] Found item: {result.item_name} for {result.item_price} {result.currency}")
         return {"purchase_data": result.model_dump()}
     except Exception as e:
         print(f"[EXTRACTOR ERROR] {e}")
-        return {"purchase_data": {"item_name": "unknown item", "item_price": 0.0, "is_credit": False, "credit_months": 1}}
+        return {"purchase_data": {"item_name": "unknown item", "item_price": 0.0, "currency": "USD", "is_credit": False, "credit_months": 1}}
+    
+async def convert_currency(state: AgentState) -> dict:
+    """Node 4.1: Live Currency Converter."""
+    print("[NODE] Converting Currency to Base (USD)...")
+    purchase = state.get("purchase_data", {})
+    
+    price = purchase.get("item_price", 0.0)
+    currency = purchase.get("currency", "USD").upper()
+    
+    if currency == "USD" or price == 0.0:
+        print("[CURRENCY] Already in USD or price is 0. Bypassing.")
+        return {"purchase_data": purchase}
+
+    try:
+        url = f"https://open.er-api.com/v6/latest/{currency}"
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            data = response.json()
+            
+        usd_rate = data.get("rates", {}).get("USD")
+        
+        if usd_rate:
+            converted_price = round(price * usd_rate, 2)
+            print(f"[CURRENCY] Converted {price} {currency} -> ${converted_price} USD (Rate: {usd_rate})")
+            
+            purchase["original_price"] = price
+            purchase["original_currency"] = currency
+            purchase["item_price"] = converted_price
+            purchase["currency"] = "USD"
+        else:
+            print("[CURRENCY ERROR] USD rate not found in API response.")
+            
+    except Exception as e:
+        print(f"[CURRENCY ERROR] API failed: {e}. Falling back to original price without conversion.")
+
+    return {"purchase_data": purchase}
+
 def fetch_market_price(state: AgentState) -> dict:
-    """Node 4.5: Searches the web for the current average price of the item."""
+    """Node 4.5: Web Search."""
     print("[NODE] Fetching Market Price from Web...")
     item_name = state.get("purchase_data", {}).get("item_name")
     
@@ -255,7 +461,7 @@ def fetch_market_price(state: AgentState) -> dict:
         return {"market_context": "Could not fetch market data due to search error."}
     
 def analyze_purchase_risk(state: AgentState) -> dict:
-    """Node 4b: Evaluates financial safety dynamically based on REAL database metrics."""
+    """Node 4b: Financial Risk Engine."""
     print("[NODE] Analyzing Purchase Risk...")
     data = state.get("purchase_data", {})
     metrics = state.get("metrics", {})
@@ -280,20 +486,16 @@ def analyze_purchase_risk(state: AgentState) -> dict:
     print(f"[RISK ANALYZER] Verdict: {'Risky' if verdict['is_risky'] else 'Safe'} - {verdict['reason']}")
     return {"purchase_risk": verdict}
 
+
 async def generate_final_response(state: AgentState) -> dict:
     """Node 5: The Chat Responder."""
     print("[NODE] Generating Final Response...")
     messages = state.get("messages", [])
     last_user_message = state.get("translated_text") or (messages[-1].content if messages else "")
     
-    # ==========================================
-    # FIX: NULL VALUE PROTECTION
-    # ==========================================
     transactions = state.get("extracted_transactions") or []
     balance = state.get("financial_result")
     
-    # If the graph bypassed the math node (e.g., general_chat), balance will be None.
-    # We force it to 0.0 to prevent a 500 Internal Server Error during string formatting.
     if balance is None:
         balance = 0.0
         
@@ -302,30 +504,43 @@ async def generate_final_response(state: AgentState) -> dict:
     
     burn_rate = metrics.get("burn_rate", 0.0)
     runway = metrics.get("runway_months", 0.0)
-    # ==========================================
     
     if intent == "evaluate_purchase":
         purchase = state.get("purchase_data", {})
         risk = state.get("purchase_risk", {})
         market = state.get("market_context", "No data")
         
-        system_prompt = f"""You are a strict data reporter. Your ONLY job is to relay the exact numbers provided below. 
-        DO NOT invent market prices. DO NOT correct the user's price. DO NOT give financial advice.
+        orig_price = purchase.get('original_price', purchase.get('item_price'))
+        orig_currency = purchase.get('original_currency', 'USD')
+        usd_price = purchase.get('item_price')
         
-        [CALCULATOR DATA]
-        Requested Item: {purchase.get('item_name')}
-        Requested Price: ${purchase.get('item_price')}
-        Current Balance: ${balance:.2f}
-        Verdict: {'Insufficient Funds' if risk.get('is_risky') else 'Sufficient Funds'}
-        Math Details: {risk.get('details')}
+        system_prompt = f"""You are a strict data formatter. Your ONLY job is to output the exact template below, filling in the bracketed info using the [DATA]. 
         
-        [MARKET RESEARCH FROM WEB]
-        {market}
+        [DATA]
+        Item: {purchase.get('item_name')}
+        Requested Price: {orig_price} {orig_currency}
+        Converted Price: ${usd_price:.2f} USD
+        Current Balance: ${balance:.2f} USD
+        Math Conclusion: {'Balance is lower than price' if risk.get('is_risky') else 'Balance is sufficient'}
+        Market Info: {market}
 
-        Write a professional response. 
-        1. State if the purchase is approved or denied based on the Calculator Verdict and user's balance.
-        2. Compare the user's Target Price with the average prices found in the Market Research. Advise if they are overpaying or if it's a good deal.
-        Do not invent numbers. Base your market analysis ONLY on the [MARKET RESEARCH FROM WEB] block. Always respond in English."""
+        OUTPUT TEMPLATE (Copy this exactly and fill it in, do not add any other text):
+        Product: [Insert Item here]
+        Price: [Insert Requested Price here] (Converted to [Insert Converted Price])
+        Current Balance: [Insert Current Balance]
+        Conclusion: [Insert Math Conclusion here]. Therefore, you [can/cannot] afford this item.
+        Market Comparison: [Summarize Market Info in 1 sentence, or say 'No data available']
+        """
+        
+        clean_messages = [
+            ("system", system_prompt),
+            ("human", "Format the data into the template.")
+        ]
+        
+
+        response = await llm_chat.ainvoke(clean_messages)
+        print("[SUCCESS] Final response generated (Clean Mode).")
+        return {"messages": [response]}
         
     elif intent == "analyze_runway":
         system_prompt = f"""You are MonoMind, an elite financial AI assistant. 
@@ -349,6 +564,7 @@ async def generate_final_response(state: AgentState) -> dict:
         
         CRITICAL: Always respond in English, regardless of the language the user speaks."""
     
+
     prompt = ChatPromptTemplate.from_messages([
         ("system", system_prompt),
         ("human", "{user_input}")
@@ -362,34 +578,41 @@ async def generate_final_response(state: AgentState) -> dict:
 # 4. Edges (Routing Logic)
 # =============================================================================
 def route_based_on_intent(state: AgentState) -> str:
+    """Routes the graph based on the initial intent detected by Node 1."""
     if state.get("intent") in ["get_balance", "analyze_runway", "evaluate_purchase"]:
         return "fetch_ledger_data"
     return "generate_final_response"
 
 def route_after_math(state: AgentState) -> str:
+    """Routes the graph after core math processing is complete."""
     if state.get("intent") == "evaluate_purchase":
-        return "extract_purchase_info"
+        return "analyze_image"
     return "generate_final_response"
 
 # =============================================================================
-# 5. Graph Compilation with Static Memory (SQLite)
+# 5. Graph Compilation
 # =============================================================================
 workflow = StateGraph(AgentState)
 
 # Register all nodes
 workflow.add_node("translate_input", translate_user_input)
+workflow.add_node("extract_url_content", extract_url_content) # NEW NODE
 workflow.add_node("analyze_intent", analyze_intent)
 workflow.add_node("fetch_ledger_data", fetch_ledger_data)
 workflow.add_node("run_math_engine", run_math_engine)
+workflow.add_node("analyze_image", analyze_image)
 workflow.add_node("extract_purchase_info", extract_purchase_info)
+workflow.add_node("convert_currency", convert_currency) 
 workflow.add_node("fetch_market_price", fetch_market_price)
 workflow.add_node("analyze_purchase_risk", analyze_purchase_risk)
 workflow.add_node("generate_final_response", generate_final_response)
 
 # Flow definitions
 workflow.set_entry_point("translate_input")
-workflow.add_edge("translate_input", "analyze_intent")
+workflow.add_edge("translate_input", "extract_url_content")   # UPDATED ROUTE
+workflow.add_edge("extract_url_content", "analyze_intent")    # UPDATED ROUTE
 
+# Conditional routing based on user intent
 workflow.add_conditional_edges(
     "analyze_intent",
     route_based_on_intent,
@@ -401,20 +624,23 @@ workflow.add_conditional_edges(
 
 workflow.add_edge("fetch_ledger_data", "run_math_engine")
 
+# Conditional routing after database & math calculations
 workflow.add_conditional_edges(
     "run_math_engine",
     route_after_math,
     {
-        "extract_purchase_info": "extract_purchase_info",
+        "analyze_image": "analyze_image",
         "generate_final_response": "generate_final_response"
     }
 )
 
-workflow.add_edge("extract_purchase_info", "fetch_market_price")
+# Linear flow for purchase evaluation
+workflow.add_edge("analyze_image", "extract_purchase_info")
+workflow.add_edge("extract_purchase_info", "convert_currency") 
+workflow.add_edge("convert_currency", "fetch_market_price") 
 workflow.add_edge("fetch_market_price", "analyze_purchase_risk")
 workflow.add_edge("analyze_purchase_risk", "generate_final_response") 
 workflow.add_edge("generate_final_response", END)
 
-# NEW: Export the uncompiled workflow. 
-# Memory compilation is now handled dynamically inside routes.py to avoid async conflicts.
+# Export the uncompiled workflow. 
 app_workflow = workflow

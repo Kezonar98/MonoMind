@@ -1,4 +1,3 @@
-# app/models/ledger.py
 import enum
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -19,7 +18,8 @@ class TransactionType(str, enum.Enum):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, index=True)
+    # UPDATED: Telegram ID as a string. No autoincrement!
+    id: Mapped[str] = mapped_column(String(50), primary_key=True, index=True)
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
@@ -33,8 +33,11 @@ class User(Base):
 class Transaction(Base):
     __tablename__ = "transactions"
 
+    # Internal transaction ID remains a standard auto-incrementing integer
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True, index=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    
+    # UPDATED: user_id is now a String to match User.id
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), index=True)
     
     # Financial data requires exact precision (14 digits total, 4 decimal places)
     amount: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)

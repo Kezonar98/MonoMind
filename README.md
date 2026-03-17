@@ -1,4 +1,4 @@
-#  MonoMind: Edge-AI Financial Assistant
+#  MonoMind: Hybrid-AI Financial Advisor/Assistant
 
 ![Python 3.12](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge&logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.109-009688?style=for-the-badge&logo=fastapi)
@@ -6,63 +6,61 @@
 ![LangGraph](https://img.shields.io/badge/LangGraph-State_Machine-FF4B4B?style=for-the-badge)
 ![Aiogram](https://img.shields.io/badge/Telegram_UI-aiogram-2CA5E0?style=for-the-badge&logo=telegram)
 
-MonoMind is an experimental, fully local financial AI assistant. It explores how to build an AI-driven FinTech application without sending sensitive financial data to cloud providers (like OpenAI) and without allowing the LLM to hallucinate numbers.
+MonoMind is a production-ready, hybrid FinTech cognitive engine. It redefines personal financial management by bridging the gap between secure, deterministic banking architecture and advanced Large Language Model (LLM) reasoning.
 
-The core idea is a strict **separation of concerns**: the LLM is only used for semantic routing and text formatting, while all math, logic, and data retrieval are handled deterministically by Python and PostgreSQL.
+Our core value proposition solves the biggest bottleneck in FinTech AI adoption: hallucinations and mathematical unreliability. MonoMind employs a strict Separation of Concerns (High Cohesion, Low Coupling): the LLM is isolated and utilized exclusively for semantic routing, natural language understanding, and data formatting. All critical operations—mathematics, ledger updates, and balance calculations—are handled deterministically by a secure Python & PostgreSQL backend.
 
-## Architecture & Engineering Trade-offs
+Architecture & Engineering Strategy
+When building this MVP, we focused on architectural flexibility, computational power, and strict data integrity.
 
-When building this MVP, I focused on solving two main problems: **Data Privacy** and **Hardware Constraints**.
+1. The Cognitive Layer (LangGraph State Machine)
+Instead of a standard, unpredictable conversational loop, the AI operates as a directed acyclic graph (DAG):
 
-### 1. The Memory Constraint (Running AI on Edge)
-Running LLMs locally usually requires significant VRAM/RAM. This project was specifically optimized to run on a machine with limited memory.
-* **Solution:** We use `llama3.2:1b` via Ollama. 
-* **RAM Optimization:** I configured a Linux Swap file to prevent OS-level OOM killers during tensor loading. Additionally, context windows were strictly pruned (`num_ctx=512` and `num_predict=50` for the router node) to keep memory footprint minimal.
-* **Linguistic Trade-off:** To maximize the 1B model's reasoning capabilities, the AI is strictly instructed to respond in English, bypassing the tokenization issues of Cyrillic languages in ultra-small models.
+Semantic Router: Determines user intent (e.g., balance check vs. complex runway analysis).
 
-### 2. The LangGraph State Machine
-Instead of a standard conversational loop, the AI operates as a directed graph:
-1. **Semantic Router:** Determines if the user wants a balance check or a complex runway analysis.
-2. **Ledger Fetcher:** Triggers an async SQLAlchemy query to PostgreSQL.
-3. **Deterministic Math:** Pure Python calculates balance, burn rate, and financial runway. *The LLM is explicitly forbidden from doing math.*
-4. **Presenter:** The LLM receives calculated facts as a system prompt and formats a human-readable response.
+Ledger Fetcher: Triggers async SQLAlchemy queries to PostgreSQL.
 
-### 3. The Data Layer (Event-Sourced Ledger)
-Standard CRUD doesn't work well for FinTech. The database follows an **Append-Only Ledger** pattern:
-* Balances are never updated via `UPDATE`. They are calculated on the fly by aggregating `DEPOSIT` and `WITHDRAWAL` transactions.
+Deterministic Math: Pure Python calculates balance, burn rate, and financial runway. The LLM is explicitly firewalled from performing any mathematical operations.
 
-##  Current Status (MVP Achieved)
+Presenter: The LLM receives calculated facts as a system prompt and formats a human-readable, contextual response.
 
-**What's done:**
-- [x] Immutable PostgreSQL Ledger setup via asyncpg & Alembic.
-- [x] Local LLM integration with memory optimization.
-- [x] LangGraph routing and deterministic math execution (Balance & Burn Rate).
-- [x] Predictive Analytics: Financial Runway calculation.
-- [x] FastAPI Gateway exposing the cognitive engine (`POST /api/v1/chat/`).
-- [x] Hexagonal Architecture UI: Asynchronous Telegram Bot client connected to the core API.
+2. Hybrid AI & Enterprise Scalability
+Currently, MonoMind leverages the Groq API (70B parameter models) to deliver lightning-fast, highly intelligent semantic routing and reasoning.
 
-##  Roadmap & Next Steps
+Enterprise Readiness: Due to our low-coupling architecture, the LLM layer is entirely modular. For B2B or Enterprise banking integrations, the Groq API can be seamlessly swapped out for a fully private, on-premise custom model to ensure zero-knowledge data privacy and compliance with financial regulations.
 
-This project is actively evolving. The upcoming milestones are divided into infrastructure, integrations, and advanced cognitive features:
+3. The Data Layer (Event-Sourced Ledger)
+Standard CRUD architectures are fundamentally flawed for financial systems. MonoMind implements an Append-Only Ledger pattern:
 
-### Phase 1: Infrastructure & DevOps
-- [ ] **Dockerization:** Wrap the entire ecosystem (PostgreSQL, FastAPI Core, Telegram UI, and Ollama) into a single `docker-compose.yml` for one-click deployment.
+Records are immutable. Balances are never updated via UPDATE. They are dynamically aggregated from DEPOSIT and WITHDRAWAL transactions, ensuring 100% auditability and state recovery.
 
-### Phase 2: Real-World Data
-- [ ] **Open Banking API Integration:** Connect to real-world bank APIs (e.g., Monobank Webhooks) to automatically sync and ingest live transactions into the PostgreSQL ledger.
+💡 Key Features & Use Cases
+Immutable PostgreSQL Ledger: Secure, async logging of all financial events.
 
-### Phase 3: Advanced Cognitive Finance & RAG
-- [ ] **Micro-Loan Risk Analysis:** If a user asks, *"Should I get a loan for a bag of chips?"*, the AI will calculate the loan term, assess cash-flow risks, and warn if monthly expenses (including the new loan) exceed income.
-- [ ] **Macroeconomic RAG (Retrieval-Augmented Generation):** Integrate a news parser vector database. If a user asks about the Hryvnia (UAH) currency drop, the AI will fetch recent financial news, analyze the causes, and generate scenarios for currency appreciation based on real-world events.
+Predictive Analytics: Financial Runway calculation and Burn Rate monitoring.
 
-### Phase 4: Experimental
-- [ ] **Multilingual Support:** Experiment with fine-tuning or larger models to handle native Ukrainian processing without losing Edge deployment capabilities.
+Micro-Loan Risk Analysis: If a user asks, "Should I get a loan for a bag of chips?", the AI calculates the loan term, assesses current cash flow, and warns if monthly expenses exceed income.
 
-##  Running Locally
-*(Instructions will be updated to `docker-compose up` in the next release)*
-```bash
-# Start the Core Backend
-uvicorn main:app
+⚠️ Disclaimer: MonoMind acts solely as an artificial intelligence and financial advisor. The final decision, as well as the responsibility for that decision, rests entirely with you.
 
-# Start the Telegram UI Client
-python app/ui/bot/main.py
+🚀 Running Locally
+The entire ecosystem (PostgreSQL, FastAPI Core, Telegram UI, and API integrations) is fully containerized for a seamless developer experience.
+
+Bash
+# 1. Clone the repository
+git clone https://github.com/yourusername/monomind.git
+cd monomind
+
+# 2. Configure your environment variables (add your Groq API key to .env)
+cp .env.example .env
+
+# 3. Build and spin up the infrastructure
+docker compose up --build
+🗺 Roadmap & Next Steps
+This project is actively evolving towards a comprehensive FinTech ecosystem.
+
+Phase 1: Real-World Data Integration
+[ ] Open Banking API: Connect to real-world banking APIs (e.g., Monobank Webhooks) to automatically sync and ingest live transactions into the PostgreSQL ledger.
+
+Phase 2: Advanced Cognitive Finance & RAG
+[ ] Macroeconomic RAG (Retrieval-Augmented Generation): Integrate a news parser vector database. If a user asks about currency drops or market volatility, the AI will fetch recent financial news, analyze the causes, and generate scenarios based on real-world events.
